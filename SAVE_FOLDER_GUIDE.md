@@ -149,8 +149,8 @@ When you choose a custom folder:
 // Opens native folder picker
 final selectedDirectory = await FilePicker.getDirectoryPath();
 
-// Saves your choice
-service.setSaveDirectory(selectedDirectory);
+// Saves your choice for future app launches
+await service.setSaveDirectory(selectedDirectory);
 ```
 
 ### During File Reception
@@ -355,16 +355,8 @@ Files sync across Apple devices
 
 ### Scripted/Automated Setups
 
-Currently, V-Shere saves the folder choice in memory. To persist across app restarts:
-
-**Future Enhancement** (not yet implemented):
-```dart
-// Save to persistent storage
-await SharedPreferences.setString('save_folder', selectedPath);
-
-// Load on app start
-final savedPath = SharedPreferences.getString('save_folder');
-```
+The selected folder is stored in the app's application-support directory and
+loaded again when the Receive screen opens after an app restart.
 
 ---
 
@@ -372,7 +364,7 @@ final savedPath = SharedPreferences.getString('save_folder');
 
 ### Q: Will my choice be remembered after closing the app?
 
-**A:** Currently, the custom folder is stored in memory only. After restarting V-Shere, it reverts to the default folder. A future update will add persistent storage.
+**A:** Yes. V-Shere remembers the selected folder after closing and reopening the app.
 
 ### Q: Can I use the same folder for different devices?
 

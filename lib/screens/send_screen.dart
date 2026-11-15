@@ -12,7 +12,6 @@ class SendScreen extends StatefulWidget {
 
 class _SendScreenState extends State<SendScreen> {
   final deviceController = TextEditingController();
-  final portController = TextEditingController(text: '4040');
 
   final service = TransferService();
 
@@ -24,7 +23,6 @@ class _SendScreenState extends State<SendScreen> {
   List<DiscoveredDevice> discoveredDevices = [];
   DiscoverySession? discoverySession;
   DiscoveredDevice? selectedDevice;
-  bool showPortField = false;
 
   @override
   void initState() {
@@ -34,6 +32,7 @@ class _SendScreenState extends State<SendScreen> {
 
   Future<void> startScanning() async {
     discoverySession?.stop();
+    final targetName = deviceController.text.trim();
     final session = await service.startDiscovery(
       onDeviceFound: (device) {
         if (!mounted) return;
@@ -54,13 +53,38 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
     discoverySession = session;
+
+    if (targetName.isEmpty) return;
+
+    setState(() => status = 'Searching for "$targetName"...');
+    final device = await service.resolveTargetDevice(
+      targetName,
+      discoveredDevices,
+    );
+    if (!mounted) return;
+
+    if (device != null) {
+      setState(() {
+        final alreadyListed = discoveredDevices.any(
+          (existing) =>
+              existing.ip == device.ip && existing.port == device.port,
+        );
+        if (!alreadyListed) discoveredDevices.add(device);
+        status = '✓ Found ${device.name}';
+      });
+    } else if (!discoveredDevices.any(
+      (existing) => existing.name.toLowerCase() == targetName.toLowerCase(),
+    )) {
+      setState(() {
+        status = 'Could not find "$targetName". Check the receiver name.';
+      });
+    }
   }
 
   void selectDevice(DiscoveredDevice device) {
     setState(() {
       selectedDevice = device;
       deviceController.text = device.name;
-      portController.text = device.port.toString();
       status = '✓ Connected to ${device.name}';
     });
   }
@@ -101,14 +125,9 @@ class _SendScreenState extends State<SendScreen> {
 
   Future<void> sendFiles() async {
     final target = deviceController.text.trim();
-    final port = int.tryParse(portController.text.trim());
 
     if (target.isEmpty) {
       setState(() => status = '⚠ Please choose a receiver device');
-      return;
-    }
-    if (port == null || port < 1 || port > 65535) {
-      setState(() => status = '⚠ Invalid port number');
       return;
     }
     if (selectedFiles.isEmpty) {
@@ -136,10 +155,6 @@ class _SendScreenState extends State<SendScreen> {
     }
 
     final targetIp = targetDevice.ip;
-    final targetPort =
-        (selectedDevice != null && selectedDevice!.name == target)
-        ? selectedDevice!.port
-        : port;
 
     try {
       for (int i = 0; i < selectedFiles.length; i++) {
@@ -151,7 +166,7 @@ class _SendScreenState extends State<SendScreen> {
 
         await service.sendFile(
           receiverIp: targetIp,
-          receiverPort: targetPort,
+          receiverPort: targetDevice.port,
           file: file,
         );
       }
@@ -171,7 +186,6 @@ class _SendScreenState extends State<SendScreen> {
   void dispose() {
     discoverySession?.stop();
     deviceController.dispose();
-    portController.dispose();
     super.dispose();
   }
 
@@ -279,16 +293,6 @@ class _SendScreenState extends State<SendScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('Send Files'),
-        actions: [
-          IconButton(
-            icon: Icon(
-              showPortField ? Icons.tune_rounded : Icons.tune_outlined,
-              color: showPortField ? const Color(0xFF00E5FF) : Colors.white38,
-              size: 20,
-            ),
-            onPressed: () => setState(() => showPortField = !showPortField),
-          ),
-        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -372,7 +376,7 @@ class _SendScreenState extends State<SendScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                       decoration: InputDecoration(
-                        hintText: 'Device name or IP',
+                        hintText: 'Device name',
                         hintStyle: TextStyle(
                           color: Colors.white.withValues(alpha: 0.2),
                           fontWeight: FontWeight.normal,
@@ -424,60 +428,6 @@ class _SendScreenState extends State<SendScreen> {
                       ),
                       onChanged: (_) => setState(() {}),
                     ),
-                    // Port field (hidden by default)
-                    if (showPortField) ...[
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.tag_rounded,
-                            size: 14,
-                            color: Colors.white.withValues(alpha: 0.3),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Port',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.white.withValues(alpha: 0.4),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          SizedBox(
-                            width: 80,
-                            child: TextField(
-                              controller: portController,
-                              keyboardType: TextInputType.number,
-                              style: const TextStyle(fontSize: 12),
-                              decoration: InputDecoration(
-                                isDense: true,
-                                filled: true,
-                                fillColor: const Color(0xFF080D18),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 8,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                  borderSide: BorderSide.none,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              '4040 Android / 4041 Windows',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Colors.white.withValues(alpha: 0.25),
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
                   ],
                 ),
               ),

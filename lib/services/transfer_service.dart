@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -20,10 +22,17 @@ class DiscoveredDevice {
   final String platform;
 }
 
-class DiscoverySession {
-  DiscoverySession(this._socket, this._timer);
+class ReceivedFile {
+  const ReceivedFile({required this.name, required this.path});
 
-  final RawDatagramSocket _socket;
+  final String name;
+  final String path;
+}
+
+class DiscoverySession {
+  DiscoverySession(this._sockets, this._timer);
+
+  final List<RawDatagramSocket> _sockets;
   final Timer _timer;
   bool _stopped = false;
 
@@ -31,7 +40,9 @@ class DiscoverySession {
     if (_stopped) return;
     _stopped = true;
     _timer.cancel();
-    _socket.close();
+    for (final socket in _sockets) {
+      socket.close();
+    }
   }
 }
 
@@ -39,13 +50,42 @@ class TransferService {
   static const int androidPort = 4040;
   static const int windowsPort = 4041;
   static const int discoveryPort = 4042;
+  static const String _saveDirectoryFileName = 'save_directory.txt';
+  static const MethodChannel _multicastChannel = MethodChannel(
+    'v_shere/wifi_multicast',
+  );
 
   HttpServer? _server;
   RawDatagramSocket? _discoveryResponder;
   String? _selectedSaveDirectory;
+  String? _localDeviceName;
+  bool _multicastLockHeld = false;
 
   int get receiverPort {
     return Platform.isWindows ? windowsPort : androidPort;
+  }
+
+  Future<String> getLocalDeviceName() async {
+    final cachedName = _localDeviceName;
+    if (cachedName != null) return cachedName;
+
+    if (Platform.isAndroid) {
+      final deviceInfo = await DeviceInfoPlugin().androidInfo;
+      final configuredName = deviceInfo.name.trim();
+      final modelName = deviceInfo.model.trim();
+      final name =
+          configuredName.isNotEmpty &&
+              configuredName.toLowerCase() != 'localhost'
+          ? configuredName
+          : modelName;
+      final resolvedName = name.isNotEmpty ? name : 'Android device';
+      _localDeviceName = resolvedName;
+      return resolvedName;
+    }
+
+    final hostname = Platform.localHostname;
+    _localDeviceName = hostname;
+    return hostname;
   }
 
   String get _platformName {
@@ -60,53 +100,83 @@ class TransferService {
   Future<DiscoverySession> startDiscovery({
     required void Function(DiscoveredDevice device) onDeviceFound,
   }) async {
-    final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-    socket.broadcastEnabled = true;
+    final interfaces = await NetworkInterface.list(
+      type: InternetAddressType.IPv4,
+      includeLoopback: false,
+    );
+    final addresses = interfaces
+        .expand((interface) => interface.addresses)
+        .where(
+          (address) =>
+              !address.isLoopback && !address.address.startsWith('169.254.'),
+        )
+        .toList();
+    final sockets = <RawDatagramSocket>[];
+
+    try {
+      for (final address in addresses) {
+        final socket = await RawDatagramSocket.bind(address, 0);
+        socket.broadcastEnabled = true;
+        sockets.add(socket);
+      }
+
+      if (sockets.isEmpty) {
+        final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+        socket.broadcastEnabled = true;
+        sockets.add(socket);
+      }
+    } on SocketException {
+      for (final socket in sockets) {
+        socket.close();
+      }
+      rethrow;
+    }
 
     void scan() {
       final query = utf8.encode('V_SHERE_DISCOVER');
-      socket.send(query, InternetAddress('255.255.255.255'), discoveryPort);
+      for (final socket in sockets) {
+        socket.send(query, InternetAddress('255.255.255.255'), discoveryPort);
+      }
     }
 
-    socket.listen((event) {
-      if (event != RawSocketEvent.read) return;
+    for (final socket in sockets) {
+      socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
 
-      Datagram? datagram;
-      while ((datagram = socket.receive()) != null) {
-        try {
-          final data = jsonDecode(utf8.decode(datagram!.data));
-          if (data is! Map<String, dynamic> || data['service'] != 'v-shere') {
-            continue;
+        Datagram? datagram;
+        while ((datagram = socket.receive()) != null) {
+          try {
+            final receivedDatagram = datagram!;
+            final data = jsonDecode(utf8.decode(receivedDatagram.data));
+            if (data is! Map<String, dynamic> || data['service'] != 'v-shere') {
+              continue;
+            }
+
+            final name = data['name'];
+            final port = data['port'];
+            final platform = data['platform'];
+            if (name is! String || port is! int || platform is! String) {
+              continue;
+            }
+
+            onDeviceFound(
+              DiscoveredDevice(
+                name: name,
+                ip: receivedDatagram.address.address,
+                port: port,
+                platform: platform,
+              ),
+            );
+          } on FormatException {
+            // Ignore unrelated UDP packets.
           }
-
-          final ip = data['ip'];
-          final name = data['name'];
-          final port = data['port'];
-          final platform = data['platform'];
-          if (ip is! String ||
-              name is! String ||
-              port is! int ||
-              platform is! String) {
-            continue;
-          }
-
-          onDeviceFound(
-            DiscoveredDevice(
-              name: name,
-              ip: ip,
-              port: port,
-              platform: platform,
-            ),
-          );
-        } on FormatException {
-          // Ignore unrelated UDP packets.
         }
-      }
-    });
+      });
+    }
 
     scan();
     final timer = Timer.periodic(const Duration(seconds: 3), (_) => scan());
-    return DiscoverySession(socket, timer);
+    return DiscoverySession(sockets, timer);
   }
 
   Future<DiscoveredDevice?> resolveTargetDevice(
@@ -115,23 +185,73 @@ class TransferService {
   ) async {
     final normalizedTarget = target.toLowerCase();
     for (final device in devices) {
-      if (device.name.toLowerCase() == normalizedTarget ||
-          device.ip.toLowerCase() == normalizedTarget) {
+      if (device.name.toLowerCase() == normalizedTarget) {
         return device;
       }
     }
 
-    final parsedAddress = InternetAddress.tryParse(target);
-    if (parsedAddress != null) {
-      return DiscoveredDevice(
-        name: target,
-        ip: target,
-        port: androidPort,
-        platform: 'Unknown',
-      );
+    if (InternetAddress.tryParse(target) != null) {
+      return null;
+    }
+
+    final hostnames = target.toLowerCase().endsWith('.local')
+        ? [target]
+        : [target, '$target.local'];
+    for (final hostname in hostnames) {
+      late final List<InternetAddress> addresses;
+      try {
+        addresses = await InternetAddress.lookup(
+          hostname,
+          type: InternetAddressType.IPv4,
+        );
+      } on SocketException {
+        continue;
+      }
+
+      for (final address in addresses) {
+        for (final port in [windowsPort, androidPort]) {
+          if (await _isVShereReceiver(address.address, port)) {
+            return DiscoveredDevice(
+              name: target,
+              ip: address.address,
+              port: port,
+              platform: 'Unknown',
+            );
+          }
+        }
+      }
     }
 
     return null;
+  }
+
+  Future<bool> _isVShereReceiver(String host, int port) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+    final uri = Uri(scheme: 'http', host: host, port: port, path: '/health');
+
+    try {
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 1));
+      final response = await request.close().timeout(
+        const Duration(seconds: 1),
+      );
+      if (response.statusCode != HttpStatus.ok) return false;
+
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 1));
+      return body == 'V-Shere is ready';
+    } on SocketException {
+      return false;
+    } on HttpException {
+      return false;
+    } on TimeoutException {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   // Default folder when the user hasn't selected one.
@@ -159,14 +279,40 @@ class TransferService {
     return folder.path;
   }
 
-  // Set the folder selected by the user.
-  void setSaveDirectory(String directory) {
+  Future<File> _saveDirectoryPreferencesFile() async {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    return File(
+      '${directory.path}${Platform.pathSeparator}$_saveDirectoryFileName',
+    );
+  }
+
+  // Persist the folder selected by the user.
+  Future<void> setSaveDirectory(String directory) async {
+    if (directory.isEmpty) {
+      throw ArgumentError.value(directory, 'directory', 'Must not be empty');
+    }
+
+    final preferencesFile = await _saveDirectoryPreferencesFile();
+    await preferencesFile.writeAsString(directory, flush: true);
     _selectedSaveDirectory = directory;
   }
 
-  // Return the current folder.
+  // Return the saved folder, or the default when no folder was selected.
   Future<String> getSaveDirectory() async {
-    return _selectedSaveDirectory ?? await getDefaultSaveDirectory();
+    final selectedDirectory = _selectedSaveDirectory;
+    if (selectedDirectory != null) return selectedDirectory;
+
+    final preferencesFile = await _saveDirectoryPreferencesFile();
+    if (await preferencesFile.exists()) {
+      final savedDirectory = await preferencesFile.readAsString();
+      if (savedDirectory.isNotEmpty) {
+        _selectedSaveDirectory = savedDirectory;
+        return savedDirectory;
+      }
+    }
+
+    return getDefaultSaveDirectory();
   }
 
   Future<String> getLocalIp() async {
@@ -194,15 +340,37 @@ class TransferService {
     return '127.0.0.1';
   }
 
+  String sanitizeReceivedFileName(String value) {
+    final trimmed = value.trim();
+    final safeName = trimmed.isEmpty ? 'received_file' : trimmed;
+    return safeName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+  }
+
+  String buildReceivedFileName(String value) {
+    final safeName = sanitizeReceivedFileName(value);
+    return '${DateTime.now().microsecondsSinceEpoch}_$safeName';
+  }
+
   Future<String> startReceiver({
-    required Function(String) onFileReceived,
+    required void Function(ReceivedFile file) onFileReceived,
   }) async {
     if (_server != null) {
       return getLocalIp();
     }
 
-    _server = await HttpServer.bind(InternetAddress.anyIPv4, receiverPort);
-    await _startDiscoveryResponder();
+    final deviceName = await getLocalDeviceName();
+    await _acquireMulticastLock();
+    try {
+      _server = await HttpServer.bind(InternetAddress.anyIPv4, receiverPort);
+      await _startDiscoveryResponder(deviceName);
+    } catch (_) {
+      _discoveryResponder?.close();
+      _discoveryResponder = null;
+      await _server?.close(force: true);
+      _server = null;
+      await _releaseMulticastLock();
+      rethrow;
+    }
 
     _server!.listen((request) async {
       try {
@@ -222,9 +390,8 @@ class TransferService {
         final originalName =
             request.uri.queryParameters['name'] ?? 'received_file';
 
-        final safeName = originalName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-
-        final fileName = '${DateTime.now().microsecondsSinceEpoch}_$safeName';
+        final safeName = sanitizeReceivedFileName(originalName);
+        final fileName = buildReceivedFileName(originalName);
 
         // Get the latest save directory (allows changing while receiving)
         final savePath = await getSaveDirectory();
@@ -261,7 +428,7 @@ class TransferService {
         await sink.flush();
         await sink.close();
 
-        onFileReceived(fileName);
+        onFileReceived(ReceivedFile(name: safeName, path: outputFile.path));
 
         request.response.statusCode = HttpStatus.ok;
         request.response.write('File received successfully');
@@ -286,9 +453,22 @@ class TransferService {
     _discoveryResponder = null;
     await _server?.close(force: true);
     _server = null;
+    await _releaseMulticastLock();
   }
 
-  Future<void> _startDiscoveryResponder() async {
+  Future<void> _acquireMulticastLock() async {
+    if (!Platform.isAndroid || _multicastLockHeld) return;
+    await _multicastChannel.invokeMethod<void>('acquire');
+    _multicastLockHeld = true;
+  }
+
+  Future<void> _releaseMulticastLock() async {
+    if (!Platform.isAndroid || !_multicastLockHeld) return;
+    await _multicastChannel.invokeMethod<void>('release');
+    _multicastLockHeld = false;
+  }
+
+  Future<void> _startDiscoveryResponder(String deviceName) async {
     _discoveryResponder = await RawDatagramSocket.bind(
       InternetAddress.anyIPv4,
       discoveryPort,
@@ -308,7 +488,7 @@ class TransferService {
         final response = utf8.encode(
           jsonEncode({
             'service': 'v-shere',
-            'name': Platform.localHostname,
+            'name': deviceName,
             'ip': ip,
             'port': receiverPort,
             'platform': _platformName,

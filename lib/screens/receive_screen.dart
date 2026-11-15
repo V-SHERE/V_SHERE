@@ -1,7 +1,7 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../services/transfer_service.dart';
@@ -16,18 +16,38 @@ class ReceiveScreen extends StatefulWidget {
 class _ReceiveScreenState extends State<ReceiveScreen> {
   final service = TransferService();
 
-  String ipAddress = '';
-  String status = 'Receiver is not running';
+  String deviceName = '';
+  String status = kIsWeb
+      ? 'File receiving is available in the Windows and Android apps.'
+      : 'Receiver is not running';
   String saveDirectory = 'Loading folder...';
 
   bool isRunning = false;
 
-  final List<String> receivedFiles = [];
+  final List<ReceivedFile> receivedFiles = [];
 
   @override
   void initState() {
     super.initState();
-    loadSaveDirectory();
+    if (kIsWeb) {
+      saveDirectory = 'Unavailable in a web browser';
+    } else {
+      loadSaveDirectory();
+    }
+  }
+
+  void showSnackBar(
+    String message, {
+    Duration duration = const Duration(seconds: 3),
+  }) {
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+
+    messenger.showSnackBar(
+      SnackBar(content: Text(message), duration: duration),
+    );
   }
 
   Future<void> loadSaveDirectory() async {
@@ -42,15 +62,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   // Let the user choose a destination folder.
   Future<void> chooseSaveFolder() async {
+    if (kIsWeb) return;
+
     try {
       // On Android, use app-specific external storage only
       // to avoid permission issues with scoped storage
       if (Platform.isAndroid) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('On Android, files are saved to app storage folder'),
-            duration: Duration(seconds: 3),
-          ),
+        showSnackBar(
+          'On Android, files are saved to app storage folder',
+          duration: const Duration(seconds: 3),
         );
         return;
       }
@@ -65,7 +85,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         await directory.create(recursive: true);
       }
 
-      service.setSaveDirectory(selectedDirectory);
+      await service.setSaveDirectory(selectedDirectory);
 
       if (!mounted) return;
 
@@ -74,35 +94,92 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         status = 'Save location updated';
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Save folder updated successfully'),
-        ),
-      );
+      showSnackBar('Save folder updated successfully');
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Could not select folder: $error'),
-        ),
+      showSnackBar('Could not select folder: $error');
+    }
+  }
+
+  Future<void> openSaveFolder() async {
+    if (kIsWeb || !Platform.isWindows) return;
+
+    try {
+      final directory = Directory(saveDirectory);
+      if (!await directory.exists()) {
+        throw FileSystemException('Save folder does not exist', saveDirectory);
+      }
+
+      await Process.start('explorer.exe', [directory.path]);
+    } catch (error) {
+      if (!mounted) return;
+
+      showSnackBar('Could not open save folder: $error');
+    }
+  }
+
+  Future<void> saveReceivedFile(ReceivedFile receivedFile) async {
+    if (kIsWeb) return;
+
+    try {
+      final sourceFile = File(receivedFile.path);
+      if (!await sourceFile.exists()) {
+        throw FileSystemException(
+          'Received file no longer exists',
+          receivedFile.path,
+        );
+      }
+
+      final destinationPath = await FilePicker.saveFile(
+        dialogTitle: 'Save received file',
+        fileName: receivedFile.name,
+        initialDirectory: Platform.isWindows ? saveDirectory : null,
+        lockParentWindow: Platform.isWindows,
+        bytes: Platform.isWindows ? null : await sourceFile.readAsBytes(),
       );
+      if (destinationPath == null) return;
+
+      if (Platform.isWindows) {
+        // Compare resolved paths to avoid copying a file onto itself.
+        // FileSystemEntity.identical() throws if either path doesn't exist
+        // (the destination is a new path, not yet a file), so we compare
+        // canonicalized path strings instead.
+        final sourcePath = sourceFile.resolveSymbolicLinksSync();
+        final destResolved = File(destinationPath).absolute.path;
+        final sameFile =
+            sourcePath.toLowerCase() == destResolved.toLowerCase();
+        if (!sameFile) {
+          await sourceFile.copy(destinationPath);
+        }
+      }
+
+      if (!mounted) return;
+
+      showSnackBar('Saved ${receivedFile.name}');
+    } catch (error) {
+      if (!mounted) return;
+
+      showSnackBar('Could not save ${receivedFile.name}: $error');
     }
   }
 
   Future<void> startReceiving() async {
+    if (kIsWeb) return;
+
     setState(() {
       status = 'Starting receiver...';
     });
 
     try {
-      final ip = await service.startReceiver(
-        onFileReceived: (fileName) {
+      final name = await service.getLocalDeviceName();
+      await service.startReceiver(
+        onFileReceived: (file) {
           if (!mounted) return;
 
           setState(() {
-            receivedFiles.insert(0, fileName);
-            status = 'Received: $fileName';
+            receivedFiles.insert(0, file);
+            status = 'Received: ${file.name}';
           });
         },
       );
@@ -110,7 +187,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (!mounted) return;
 
       setState(() {
-        ipAddress = ip;
+        deviceName = name;
         isRunning = true;
         status = 'Ready to receive files';
       });
@@ -131,21 +208,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     setState(() {
       isRunning = false;
+      deviceName = '';
       status = 'Receiver stopped';
-      ipAddress = '';
     });
-  }
-
-  Future<void> copyIp() async {
-    await Clipboard.setData(
-      ClipboardData(text: ipAddress),
-    );
-
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('IP address copied')),
-    );
   }
 
   @override
@@ -156,13 +221,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isWeb = kIsWeb;
+    final isAndroid = !isWeb && Platform.isAndroid;
+    final isWindows = !isWeb && Platform.isWindows;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Receive Files'),
-      ),
+      appBar: AppBar(title: const Text('Receive Files')),
       body: Padding(
         padding: const EdgeInsets.all(20),
-        child: Column(
+        child: ListView(
           children: [
             const SizedBox(height: 10),
 
@@ -184,10 +251,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
             const Text(
               'Ready to receive?',
-              style: TextStyle(
-                fontSize: 23,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(fontSize: 23, fontWeight: FontWeight.bold),
             ),
 
             const SizedBox(height: 6),
@@ -209,10 +273,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   children: [
                     const Row(
                       children: [
-                        Icon(
-                          Icons.folder,
-                          color: Color(0xFF00D9FF),
-                        ),
+                        Icon(Icons.folder, color: Color(0xFF00D9FF)),
                         SizedBox(width: 10),
                         Text(
                           'SAVE LOCATION',
@@ -238,11 +299,33 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
                     SizedBox(
                       width: double.infinity,
-                      child: Platform.isAndroid
+                      child: isWeb
+                          ? OutlinedButton.icon(
+                              onPressed: null,
+                              icon: const Icon(Icons.info_outline),
+                              label: const Text('Unavailable in a web browser'),
+                            )
+                          : isAndroid
                           ? OutlinedButton.icon(
                               onPressed: null, // Disabled on Android
                               icon: const Icon(Icons.info_outline),
                               label: const Text('Android uses app storage'),
+                            )
+                          : isWindows
+                          ? Column(
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: openSaveFolder,
+                                  icon: const Icon(Icons.folder_open),
+                                  label: const Text('Open Save Folder'),
+                                ),
+                                const SizedBox(height: 8),
+                                OutlinedButton.icon(
+                                  onPressed: chooseSaveFolder,
+                                  icon: const Icon(Icons.folder),
+                                  label: const Text('Choose Save Folder'),
+                                ),
+                              ],
                             )
                           : OutlinedButton.icon(
                               onPressed: chooseSaveFolder,
@@ -264,7 +347,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   child: Column(
                     children: [
                       const Text(
-                        'YOUR IP ADDRESS',
+                        'YOUR DEVICE NAME',
                         style: TextStyle(
                           color: Colors.white60,
                           letterSpacing: 1,
@@ -274,21 +357,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       const SizedBox(height: 8),
 
                       SelectableText(
-                        ipAddress,
+                        deviceName,
                         style: const TextStyle(
                           fontSize: 23,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF00D9FF),
                         ),
                       ),
-
-                      TextButton.icon(
-                        onPressed: copyIp,
-                        icon: const Icon(Icons.copy),
-                        label: const Text('Copy IP Address'),
-                      ),
-
-                      Text('Port: ${service.receiverPort}'),
                     ],
                   ),
                 ),
@@ -300,14 +375,24 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
               width: double.infinity,
               height: 50,
               child: ElevatedButton.icon(
-                onPressed: isRunning
+                onPressed: isWeb
+                    ? null
+                    : isRunning
                     ? stopReceiving
                     : startReceiving,
                 icon: Icon(
-                  isRunning ? Icons.stop : Icons.wifi,
+                  isWeb
+                      ? Icons.info_outline
+                      : isRunning
+                      ? Icons.stop
+                      : Icons.wifi,
                 ),
                 label: Text(
-                  isRunning ? 'Stop Receiving' : 'Start Receiving',
+                  isWeb
+                      ? 'Use Windows or Android app'
+                      : isRunning
+                      ? 'Stop Receiving'
+                      : 'Start Receiving',
                 ),
               ),
             ),
@@ -318,16 +403,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
               alignment: Alignment.centerLeft,
               child: Text(
                 'Received Files',
-                style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
               ),
             ),
 
             const SizedBox(height: 8),
 
-            Expanded(
+            SizedBox(
+              height: 200,
               child: receivedFiles.isEmpty
                   ? const Center(
                       child: Text(
@@ -336,6 +419,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       ),
                     )
                   : ListView.builder(
+                      primary: false,
                       itemCount: receivedFiles.length,
                       itemBuilder: (context, index) {
                         return ListTile(
@@ -344,9 +428,16 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                             color: Colors.greenAccent,
                           ),
                           title: Text(
-                            receivedFiles[index],
+                            receivedFiles[index].name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'Save a copy',
+                            onPressed: kIsWeb
+                                ? null
+                                : () => saveReceivedFile(receivedFiles[index]),
+                            icon: const Icon(Icons.download_outlined),
                           ),
                         );
                       },

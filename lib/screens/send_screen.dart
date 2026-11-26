@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
 
 import '../services/transfer_service.dart';
+import 'main_shell.dart';
 
 class SendScreen extends StatefulWidget {
   const SendScreen({super.key});
@@ -11,9 +12,8 @@ class SendScreen extends StatefulWidget {
 }
 
 class _SendScreenState extends State<SendScreen> {
-  final deviceController = TextEditingController();
-
-  final service = TransferService();
+  final TextEditingController deviceController = TextEditingController();
+  final TransferService service = TransferService();
 
   List<PlatformFile> selectedFiles = [];
   bool sending = false;
@@ -33,6 +33,7 @@ class _SendScreenState extends State<SendScreen> {
   Future<void> startScanning() async {
     discoverySession?.stop();
     final targetName = deviceController.text.trim();
+
     final session = await service.startDiscovery(
       onDeviceFound: (device) {
         if (!mounted) return;
@@ -45,9 +46,16 @@ class _SendScreenState extends State<SendScreen> {
           } else {
             discoveredDevices.add(device);
           }
+
+          if (selectedDevice != null &&
+              selectedDevice!.ip == device.ip &&
+              selectedDevice!.port == device.port) {
+            selectedDevice = device;
+          }
         });
       },
     );
+
     if (!mounted) {
       session.stop();
       return;
@@ -56,7 +64,7 @@ class _SendScreenState extends State<SendScreen> {
 
     if (targetName.isEmpty) return;
 
-    setState(() => status = 'Searching for "$targetName"...');
+    setState(() => status = 'កំពុងស្វែងរក "$targetName"...');
     final device = await service.resolveTargetDevice(
       targetName,
       discoveredDevices,
@@ -70,13 +78,13 @@ class _SendScreenState extends State<SendScreen> {
               existing.ip == device.ip && existing.port == device.port,
         );
         if (!alreadyListed) discoveredDevices.add(device);
-        status = '✓ Found ${device.name}';
+        status = '✓ រកឃើញ ${device.name}';
       });
     } else if (!discoveredDevices.any(
       (existing) => existing.name.toLowerCase() == targetName.toLowerCase(),
     )) {
       setState(() {
-        status = 'Could not find "$targetName". Check the receiver name.';
+        status = 'រកមិនឃើញ "$targetName" ទេ។ សូមពិនិត្យឈ្មោះឧបករណ៍ទទួល។';
       });
     }
   }
@@ -85,7 +93,17 @@ class _SendScreenState extends State<SendScreen> {
     setState(() {
       selectedDevice = device;
       deviceController.text = device.name;
-      status = '✓ Connected to ${device.name}';
+      status = '✓ បានភ្ជាប់ទៅកាន់ ${device.name}';
+    });
+  }
+
+  void _onDeviceInputChanged(String value) {
+    final trimmed = value.trim().toLowerCase();
+    setState(() {
+      if (selectedDevice != null &&
+          selectedDevice!.name.toLowerCase() != trimmed) {
+        selectedDevice = null;
+      }
     });
   }
 
@@ -95,21 +113,28 @@ class _SendScreenState extends State<SendScreen> {
       withData: false,
     );
 
-    if (result != null) {
-      setState(() {
-        selectedFiles = [...selectedFiles, ...result.files];
-        final seen = <String>{};
-        selectedFiles = selectedFiles.where((f) {
-          if (f.path == null) return true;
-          return seen.add(f.path!);
-        }).toList();
-      });
-    }
+    if (result == null || !mounted) return;
+
+    setState(() {
+      selectedFiles = [...selectedFiles, ...result.files];
+      final seen = <String>{};
+      selectedFiles = selectedFiles.where((f) {
+        if (f.path == null) return true;
+        return seen.add(f.path!);
+      }).toList();
+      if (!sending) {
+        transferProgress = 0.0;
+      }
+    });
   }
 
   void removeFile(int index) {
+    if (sending) return;
     setState(() {
       selectedFiles.removeAt(index);
+      if (selectedFiles.isEmpty) {
+        transferProgress = 0.0;
+      }
     });
   }
 
@@ -124,61 +149,77 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   Future<void> sendFiles() async {
+    if (sending) return;
+
     final target = deviceController.text.trim();
 
     if (target.isEmpty) {
-      setState(() => status = '⚠ Please choose a receiver device');
+      setState(() => status = '⚠ សូមជ្រើសរើសឧបករណ៍ទទួលជាមុនសិន');
       return;
     }
     if (selectedFiles.isEmpty) {
-      setState(() => status = '⚠ Please choose at least one file');
+      setState(() => status = '⚠ សូមជ្រើសរើសឯកសារយ៉ាងហោចណាស់មួយ');
       return;
     }
 
     setState(() {
       sending = true;
       transferProgress = 0.0;
-      status = 'Finding device...';
+      status = 'កំពុងស្វែងរកឧបករណ៍...';
     });
 
     final targetDevice = await service.resolveTargetDevice(
       target,
       discoveredDevices,
     );
+    if (!mounted) return;
 
     if (targetDevice == null) {
       setState(() {
         sending = false;
-        status = '✗ Device "$target" not found';
+        status = '✗ រកមិនឃើញឧបករណ៍ "$target"';
       });
       return;
     }
 
-    final targetIp = targetDevice.ip;
+    setState(() {
+      selectedDevice = targetDevice;
+    });
 
     try {
       for (int i = 0; i < selectedFiles.length; i++) {
+        if (!mounted) return;
         final file = selectedFiles[i];
+
         setState(() {
-          transferProgress = (i + 1) / selectedFiles.length;
-          status = 'Sending ${i + 1}/${selectedFiles.length}: ${file.name}';
+          transferProgress = i / selectedFiles.length;
+          status = 'កំពុងផ្ញើ ${i + 1}/${selectedFiles.length}: ${file.name}';
         });
 
         await service.sendFile(
-          receiverIp: targetIp,
+          receiverIp: targetDevice.ip,
           receiverPort: targetDevice.port,
           file: file,
         );
+        if (!mounted) return;
+
+        setState(() {
+          transferProgress = (i + 1) / selectedFiles.length;
+        });
       }
 
+      if (!mounted) return;
       setState(() {
-        status = '✓ All files sent successfully!';
+        status = '✓ ផ្ញើឯកសារទាំងអស់បានជោគជ័យ!';
         transferProgress = 1.0;
       });
     } catch (error) {
+      if (!mounted) return;
       setState(() => status = '✗ $error');
     } finally {
-      setState(() => sending = false);
+      if (mounted) {
+        setState(() => sending = false);
+      }
     }
   }
 
@@ -225,15 +266,15 @@ class _SendScreenState extends State<SendScreen> {
       case 'zip':
       case 'rar':
       case '7z':
-        return const Color(0xFF10B981);
+        return const Color(0xFF34D399);
       case 'doc':
       case 'docx':
       case 'txt':
       case 'xls':
       case 'xlsx':
-        return const Color(0xFF3B82F6);
+        return const Color(0xFF00D9FF);
       default:
-        return const Color(0xFF64748B);
+        return const Color(0xFF94A3B8);
     }
   }
 
@@ -274,92 +315,174 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
+  BoxDecoration _homeStyleCard({
+    required Color baseCard,
+    required Color accent,
+    required bool isDark,
+  }) {
+    return BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Color.alphaBlend(
+            accent.withValues(alpha: isDark ? 0.08 : 0.11),
+            baseCard,
+          ),
+          baseCard,
+        ],
+      ),
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(
+        color: accent.withValues(alpha: 0.26),
+        width: 1,
+      ),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.28),
+          blurRadius: 18,
+          offset: const Offset(0, 8),
+        ),
+        BoxShadow(
+          color: accent.withValues(alpha: 0.06),
+          blurRadius: 20,
+          spreadRadius: -2,
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final totalBytes = selectedFiles.fold<int>(0, (sum, f) => sum + f.size);
+    final isLinked =
+        selectedDevice != null &&
+        selectedDevice!.name.toLowerCase() ==
+            deviceController.text.trim().toLowerCase();
+
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor =
+        isDark ? const Color(0xFF060A12) : const Color(0xFF0F172A);
+    final baseCard =
+        isDark ? const Color(0xFF0E1626) : const Color(0xFF172236);
+    final innerFieldColor =
+        isDark ? const Color(0xFF080D18) : const Color(0xFF0F172A);
+    const cyanPrimary = Color(0xFF00D9FF);
+    const mintPrimary = Color(0xFF34D399);
+    const textColor = Color(0xFFF8FAFC);
+    const subTextColor = Color(0xFF94A3B8);
+    final cardAccent = isLinked ? mintPrimary : cyanPrimary;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF060A12),
+      backgroundColor: bgColor,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        foregroundColor: textColor,
         leading: IconButton(
           icon: Container(
-            padding: const EdgeInsets.all(6),
+            padding: const EdgeInsets.all(7),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(10),
+              color: cyanPrimary.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(11),
+              border: Border.all(
+                color: cyanPrimary.withValues(alpha: 0.18),
+              ),
             ),
-            child: const Icon(Icons.arrow_back_rounded, size: 18),
+            child: const Icon(Icons.menu_rounded, size: 18, color: textColor),
           ),
-          onPressed: () => Navigator.pop(context),
+          tooltip: 'Menu',
+          onPressed: sending
+              ? null
+              : () {
+                  context
+                      .findAncestorStateOfType<MainShellState>()
+                      ?.openDrawer();
+                },
         ),
-        title: const Text('Send Files'),
+        title: const Text(
+          'Send Files',
+          style: TextStyle(color: textColor, fontWeight: FontWeight.w800),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Back to Home',
+            onPressed: sending
+                ? null
+                : () {
+                    context
+                        .findAncestorStateOfType<MainShellState>()
+                        ?.switchTab(0);
+                  },
+            icon: Container(
+              padding: const EdgeInsets.all(7),
+              decoration: BoxDecoration(
+                color: cyanPrimary.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(
+                  color: cyanPrimary.withValues(alpha: 0.18),
+                ),
+              ),
+              child: const Icon(Icons.home_rounded, size: 18, color: textColor),
+            ),
+          ),
+          const SizedBox(width: 6),
+        ],
       ),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // ─── Receiver Input ───
               Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0F1520),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: selectedDevice != null
-                        ? const Color(0xFF00E5FF).withValues(alpha: 0.2)
-                        : Colors.white.withValues(alpha: 0.04),
-                  ),
+                padding: const EdgeInsets.all(16),
+                decoration: _homeStyleCard(
+                  baseCard: baseCard,
+                  accent: cardAccent,
+                  isDark: isDark,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Label
                     Row(
                       children: [
-                        Text(
+                        const Text(
                           'RECEIVER',
                           style: TextStyle(
-                            fontSize: 10,
+                            fontSize: 10.5,
                             fontWeight: FontWeight.w800,
                             letterSpacing: 1.5,
-                            color: const Color(
-                              0xFF00E5FF,
-                            ).withValues(alpha: 0.8),
+                            color: cyanPrimary,
                           ),
                         ),
                         const Spacer(),
-                        if (selectedDevice != null)
+                        if (isLinked)
                           Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 8,
                               vertical: 2,
                             ),
                             decoration: BoxDecoration(
-                              color: const Color(
-                                0xFF10B981,
-                              ).withValues(alpha: 0.12),
+                              color: mintPrimary.withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            child: Row(
+                            child: const Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF10B981),
-                                    shape: BoxShape.circle,
-                                  ),
+                                Icon(
+                                  Icons.circle,
+                                  size: 6,
+                                  color: mintPrimary,
                                 ),
-                                const SizedBox(width: 4),
-                                const Text(
+                                SizedBox(width: 5),
+                                Text(
                                   'Linked',
                                   style: TextStyle(
-                                    fontSize: 9,
+                                    fontSize: 10,
                                     fontWeight: FontWeight.w700,
-                                    color: Color(0xFF10B981),
+                                    color: mintPrimary,
                                   ),
                                 ),
                               ],
@@ -367,37 +490,36 @@ class _SendScreenState extends State<SendScreen> {
                           ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    // Text field
+                    const SizedBox(height: 10),
                     TextField(
                       controller: deviceController,
+                      enabled: !sending,
                       style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
+                        color: textColor,
                       ),
                       decoration: InputDecoration(
                         hintText: 'Device name',
                         hintStyle: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.2),
+                          color: subTextColor.withValues(alpha: 0.7),
                           fontWeight: FontWeight.normal,
                           fontSize: 13,
                         ),
-                        prefixIcon: Padding(
-                          padding: const EdgeInsets.all(10),
+                        prefixIcon: const Padding(
+                          padding: EdgeInsets.all(10),
                           child: Icon(
                             Icons.devices_rounded,
                             size: 18,
-                            color: const Color(
-                              0xFF00E5FF,
-                            ).withValues(alpha: 0.6),
+                            color: cyanPrimary,
                           ),
                         ),
-                        suffixIcon: deviceController.text.isNotEmpty
+                        suffixIcon: deviceController.text.isNotEmpty && !sending
                             ? IconButton(
-                                icon: Icon(
+                                icon: const Icon(
                                   Icons.close_rounded,
                                   size: 16,
-                                  color: Colors.white.withValues(alpha: 0.3),
+                                  color: subTextColor,
                                 ),
                                 onPressed: () {
                                   setState(() {
@@ -409,7 +531,7 @@ class _SendScreenState extends State<SendScreen> {
                             : null,
                         isDense: true,
                         filled: true,
-                        fillColor: const Color(0xFF080D18),
+                        fillColor: innerFieldColor,
                         contentPadding: const EdgeInsets.symmetric(
                           vertical: 12,
                           horizontal: 14,
@@ -421,12 +543,12 @@ class _SendScreenState extends State<SendScreen> {
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(14),
                           borderSide: const BorderSide(
-                            color: Color(0xFF00E5FF),
-                            width: 1,
+                            color: cyanPrimary,
+                            width: 1.4,
                           ),
                         ),
                       ),
-                      onChanged: (_) => setState(() {}),
+                      onChanged: _onDeviceInputChanged,
                     ),
                   ],
                 ),
@@ -437,19 +559,19 @@ class _SendScreenState extends State<SendScreen> {
               // ─── Nearby Devices ───
               Row(
                 children: [
-                  Icon(
+                  const Icon(
                     Icons.radar_rounded,
                     size: 14,
-                    color: const Color(0xFF00E5FF).withValues(alpha: 0.6),
+                    color: cyanPrimary,
                   ),
                   const SizedBox(width: 5),
-                  Text(
+                  const Text(
                     'NEARBY',
                     style: TextStyle(
-                      fontSize: 10,
+                      fontSize: 10.5,
                       fontWeight: FontWeight.w800,
                       letterSpacing: 1.5,
-                      color: Colors.white.withValues(alpha: 0.4),
+                      color: subTextColor,
                     ),
                   ),
                   if (discoveredDevices.isNotEmpty) ...[
@@ -460,7 +582,7 @@ class _SendScreenState extends State<SendScreen> {
                         vertical: 1,
                       ),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF00E5FF).withValues(alpha: 0.1),
+                        color: cyanPrimary.withValues(alpha: 0.14),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
@@ -468,31 +590,34 @@ class _SendScreenState extends State<SendScreen> {
                         style: const TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.w700,
-                          color: Color(0xFF00E5FF),
+                          color: cyanPrimary,
                         ),
                       ),
                     ),
                   ],
                   const Spacer(),
                   GestureDetector(
-                    onTap: () {
-                      setState(() => discoveredDevices.clear());
-                      startScanning();
-                    },
-                    child: Row(
+                    onTap: sending
+                        ? null
+                        : () {
+                            setState(() => discoveredDevices.clear());
+                            startScanning();
+                          },
+                    child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
                           Icons.refresh_rounded,
-                          size: 12,
-                          color: Colors.white.withValues(alpha: 0.35),
+                          size: 13,
+                          color: cyanPrimary,
                         ),
-                        const SizedBox(width: 3),
+                        SizedBox(width: 3),
                         Text(
                           'Scan',
                           style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.white.withValues(alpha: 0.35),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: cyanPrimary,
                           ),
                         ),
                       ],
@@ -506,30 +631,33 @@ class _SendScreenState extends State<SendScreen> {
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
+                    horizontal: 14,
+                    vertical: 11,
                   ),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF0F1520),
+                    color: baseCard,
                     borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: cyanPrimary.withValues(alpha: 0.20),
+                    ),
                   ),
-                  child: Row(
+                  child: const Row(
                     children: [
-                      const SizedBox(
-                        width: 12,
-                        height: 12,
+                      SizedBox(
+                        width: 13,
+                        height: 13,
                         child: CircularProgressIndicator(
-                          strokeWidth: 1.5,
-                          color: Color(0xFF00E5FF),
+                          strokeWidth: 1.8,
+                          color: cyanPrimary,
                         ),
                       ),
-                      const SizedBox(width: 10),
+                      SizedBox(width: 10),
                       Expanded(
                         child: Text(
                           'Scanning for receivers...',
                           style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.white.withValues(alpha: 0.35),
+                            fontSize: 12,
+                            color: subTextColor,
                           ),
                         ),
                       ),
@@ -551,7 +679,7 @@ class _SendScreenState extends State<SendScreen> {
                               device.name.toLowerCase();
 
                       return GestureDetector(
-                        onTap: () => selectDevice(device),
+                        onTap: sending ? null : () => selectDevice(device),
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 200),
                           padding: const EdgeInsets.symmetric(
@@ -562,28 +690,18 @@ class _SendScreenState extends State<SendScreen> {
                             gradient: isSelected
                                 ? const LinearGradient(
                                     colors: [
-                                      Color(0xFF00B4D8),
-                                      Color(0xFF0077B6),
+                                      Color(0xFF00D9FF),
+                                      Color(0xFF0284C7),
                                     ],
                                   )
                                 : null,
-                            color: isSelected ? null : const Color(0xFF0F1520),
+                            color: isSelected ? null : baseCard,
                             borderRadius: BorderRadius.circular(12),
                             border: isSelected
                                 ? null
                                 : Border.all(
-                                    color: Colors.white.withValues(alpha: 0.06),
+                                    color: cyanPrimary.withValues(alpha: 0.22),
                                   ),
-                            boxShadow: isSelected
-                                ? [
-                                    BoxShadow(
-                                      color: const Color(
-                                        0xFF00E5FF,
-                                      ).withValues(alpha: 0.25),
-                                      blurRadius: 10,
-                                    ),
-                                  ]
-                                : null,
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
@@ -594,8 +712,8 @@ class _SendScreenState extends State<SendScreen> {
                                     : _getPlatformIcon(device.platform),
                                 size: 15,
                                 color: isSelected
-                                    ? Colors.white
-                                    : Colors.white60,
+                                    ? const Color(0xFF060A12)
+                                    : cyanPrimary,
                               ),
                               const SizedBox(width: 6),
                               Text(
@@ -604,8 +722,8 @@ class _SendScreenState extends State<SendScreen> {
                                   fontWeight: FontWeight.w700,
                                   fontSize: 12,
                                   color: isSelected
-                                      ? Colors.white
-                                      : Colors.white70,
+                                      ? const Color(0xFF060A12)
+                                      : textColor,
                                 ),
                               ),
                             ],
@@ -621,13 +739,13 @@ class _SendScreenState extends State<SendScreen> {
               // ─── Files Header ───
               Row(
                 children: [
-                  Text(
+                  const Text(
                     'FILES',
                     style: TextStyle(
-                      fontSize: 10,
+                      fontSize: 10.5,
                       fontWeight: FontWeight.w800,
                       letterSpacing: 1.5,
-                      color: Colors.white.withValues(alpha: 0.4),
+                      color: subTextColor,
                     ),
                   ),
                   if (selectedFiles.isNotEmpty) ...[
@@ -638,29 +756,50 @@ class _SendScreenState extends State<SendScreen> {
                         vertical: 2,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.06),
+                        color: baseCard,
                         borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: cyanPrimary.withValues(alpha: 0.20),
+                        ),
                       ),
                       child: Text(
                         '${selectedFiles.length} • ${_formatBytes(totalBytes)}',
-                        style: TextStyle(
+                        style: const TextStyle(
                           fontSize: 10,
                           fontWeight: FontWeight.w600,
-                          color: Colors.white.withValues(alpha: 0.5),
+                          color: subTextColor,
                         ),
                       ),
                     ),
                     const Spacer(),
-                    GestureDetector(
-                      onTap: () => setState(() => selectedFiles.clear()),
-                      child: Text(
-                        'Clear',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.redAccent.withValues(alpha: 0.7),
+                    if (!sending) ...[
+                      GestureDetector(
+                        onTap: pickFiles,
+                        child: const Text(
+                          '+ Add',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: cyanPrimary,
+                          ),
                         ),
                       ),
-                    ),
+                      const SizedBox(width: 12),
+                      GestureDetector(
+                        onTap: () => setState(() {
+                          selectedFiles.clear();
+                          transferProgress = 0.0;
+                        }),
+                        child: const Text(
+                          'Clear',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ],
               ),
@@ -673,14 +812,10 @@ class _SendScreenState extends State<SendScreen> {
                         onTap: sending ? null : pickFiles,
                         child: Container(
                           width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0F1520),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: const Color(
-                                0xFF00E5FF,
-                              ).withValues(alpha: 0.1),
-                            ),
+                          decoration: _homeStyleCard(
+                            baseCard: baseCard,
+                            accent: cyanPrimary,
+                            isDark: isDark,
                           ),
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -689,21 +824,23 @@ class _SendScreenState extends State<SendScreen> {
                                 padding: const EdgeInsets.all(16),
                                 decoration: BoxDecoration(
                                   gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
                                     colors: [
-                                      const Color(
-                                        0xFF00E5FF,
-                                      ).withValues(alpha: 0.12),
-                                      const Color(
-                                        0xFF7C3AED,
-                                      ).withValues(alpha: 0.08),
+                                      cyanPrimary.withValues(alpha: 0.24),
+                                      const Color(0xFF0284C7)
+                                          .withValues(alpha: 0.12),
                                     ],
                                   ),
-                                  shape: BoxShape.circle,
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(
+                                    color: cyanPrimary.withValues(alpha: 0.35),
+                                  ),
                                 ),
                                 child: const Icon(
                                   Icons.add_rounded,
-                                  size: 32,
-                                  color: Color(0xFF00E5FF),
+                                  size: 30,
+                                  color: cyanPrimary,
                                 ),
                               ),
                               const SizedBox(height: 14),
@@ -712,224 +849,195 @@ class _SendScreenState extends State<SendScreen> {
                                 style: TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.w700,
-                                  color: Colors.white,
+                                  color: textColor,
                                 ),
                               ),
                               const SizedBox(height: 4),
-                              Text(
+                              const Text(
                                 'Tap to select photos, videos, docs',
                                 style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.white.withValues(alpha: 0.35),
+                                  fontSize: 11.5,
+                                  color: subTextColor,
                                 ),
                               ),
                             ],
                           ),
                         ),
                       )
-                    : Column(
-                        children: [
-                          Expanded(
-                            child: ListView.separated(
-                              physics: const BouncingScrollPhysics(),
-                              itemCount: selectedFiles.length,
-                              separatorBuilder: (_, _) =>
-                                  const SizedBox(height: 6),
-                              itemBuilder: (context, index) {
-                                final file = selectedFiles[index];
-                                final color = _getFileColor(file.name);
-                                final icon = _getFileIcon(file.name);
+                    : ListView.separated(
+                        physics: const BouncingScrollPhysics(),
+                        itemCount: selectedFiles.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 6),
+                        itemBuilder: (context, index) {
+                          final file = selectedFiles[index];
+                          final color = _getFileColor(file.name);
+                          final icon = _getFileIcon(file.name);
 
-                                return Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 10,
-                                  ),
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: baseCard,
+                              borderRadius: BorderRadius.circular(15),
+                              border: Border.all(
+                                color: color.withValues(alpha: 0.24),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 38,
+                                  height: 38,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF0F1520),
-                                    borderRadius: BorderRadius.circular(14),
+                                    color: color.withValues(alpha: 0.16),
+                                    borderRadius: BorderRadius.circular(11),
+                                    border: Border.all(
+                                      color: color.withValues(alpha: 0.30),
+                                    ),
                                   ),
-                                  child: Row(
+                                  child: Icon(icon, color: color, size: 20),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      Container(
-                                        padding: const EdgeInsets.all(8),
-                                        decoration: BoxDecoration(
-                                          color: color.withValues(alpha: 0.12),
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                        child: Icon(
-                                          icon,
-                                          color: color,
-                                          size: 18,
+                                      Text(
+                                        file.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: textColor,
                                         ),
                                       ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              file.name,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                            Text(
-                                              _formatBytes(file.size),
-                                              style: TextStyle(
-                                                fontSize: 10,
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.35,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      GestureDetector(
-                                        onTap: () => removeFile(index),
-                                        child: Icon(
-                                          Icons.close_rounded,
-                                          size: 16,
-                                          color: Colors.white.withValues(
-                                            alpha: 0.25,
-                                          ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        _formatBytes(file.size),
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: subTextColor,
                                         ),
                                       ),
                                     ],
                                   ),
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 38,
-                            child: OutlinedButton.icon(
-                              onPressed: sending ? null : pickFiles,
-                              icon: const Icon(Icons.add_rounded, size: 16),
-                              label: const Text(
-                                'Add More',
-                                style: TextStyle(fontSize: 12),
-                              ),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFF00E5FF),
-                                side: BorderSide(
-                                  color: const Color(
-                                    0xFF00E5FF,
-                                  ).withValues(alpha: 0.2),
                                 ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
+                                if (!sending)
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    onPressed: () => removeFile(index),
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      size: 18,
+                                      color: subTextColor,
+                                    ),
+                                  ),
+                              ],
                             ),
-                          ),
-                        ],
+                          );
+                        },
                       ),
               ),
 
               const SizedBox(height: 10),
 
-              // ─── Progress ───
-              if (sending)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: transferProgress > 0 ? transferProgress : null,
-                      minHeight: 4,
-                      backgroundColor: Colors.white.withValues(alpha: 0.06),
-                      color: const Color(0xFF00E5FF),
-                    ),
-                  ),
-                ),
-
-              // ─── Status ───
-              if (status.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Center(
-                    child: Text(
-                      status,
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        color: status.contains('✗') || status.contains('⚠')
-                            ? const Color(0xFFEF4444)
-                            : status.contains('✓')
-                            ? const Color(0xFF10B981)
-                            : Colors.white.withValues(alpha: 0.5),
+              // ─── Status & Progress ───
+              if (status.isNotEmpty || sending) ...[
+                if (sending || transferProgress > 0) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          status,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: subTextColor,
+                          ),
+                        ),
                       ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${(transferProgress * 100).round()}%',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: cyanPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: LinearProgressIndicator(
+                      value: transferProgress,
+                      minHeight: 6,
+                      backgroundColor: innerFieldColor,
+                      valueColor:
+                          const AlwaysStoppedAnimation<Color>(cyanPrimary),
                     ),
                   ),
-                ),
+                  const SizedBox(height: 10),
+                ] else if (status.isNotEmpty) ...[
+                  Text(
+                    status,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: subTextColor,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+              ],
 
-              // ─── Send Button ───
-              Container(
+              // ─── Send Action Button ───
+              SizedBox(
                 width: double.infinity,
                 height: 52,
-                margin: const EdgeInsets.only(bottom: 4),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF00B4D8), Color(0xFF7C3AED)],
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF00E5FF).withValues(alpha: 0.25),
-                      blurRadius: 16,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
                 child: ElevatedButton.icon(
                   onPressed: sending ? null : sendFiles,
-                  icon: sending
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(
-                          Icons.send_rounded,
-                          size: 18,
-                          color: Colors.white,
-                        ),
-                  label: Text(
-                    sending ? 'Sending...' : 'Send Files',
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    shadowColor: Colors.transparent,
+                    backgroundColor: cyanPrimary,
+                    foregroundColor: const Color(0xFF060A12),
+                    disabledBackgroundColor: baseCard,
+                    disabledForegroundColor: subTextColor,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
+                  icon: sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFF060A12),
+                          ),
+                        )
+                      : const Icon(Icons.send_rounded),
+                  label: Text(
+                    sending
+                        ? 'កំពុងផ្ញើ...'
+                        : selectedFiles.isEmpty
+                            ? 'Send Files'
+                            : 'Send (${selectedFiles.length})',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
+                  ),
                 ),
               ),
+              const SizedBox(height: 6),
             ],
           ),
         ),

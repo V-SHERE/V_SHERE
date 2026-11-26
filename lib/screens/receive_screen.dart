@@ -1,10 +1,12 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 
 import '../services/transfer_service.dart';
+import 'main_shell.dart';
+import 'settings_screen.dart';
 
 class ReceiveScreen extends StatefulWidget {
   const ReceiveScreen({super.key});
@@ -55,68 +57,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     if (!mounted) return;
 
+    AppSettingsController.instance.saveDirectory.value = path;
     setState(() {
       saveDirectory = path;
     });
-  }
-
-  // Let the user choose a destination folder.
-  Future<void> chooseSaveFolder() async {
-    if (kIsWeb) return;
-
-    try {
-      // On Android, use app-specific external storage only
-      // to avoid permission issues with scoped storage
-      if (Platform.isAndroid) {
-        showSnackBar(
-          'On Android, files are saved to app storage folder',
-          duration: const Duration(seconds: 3),
-        );
-        return;
-      }
-
-      final selectedDirectory = await FilePicker.getDirectoryPath();
-
-      if (selectedDirectory == null) return;
-
-      final directory = Directory(selectedDirectory);
-
-      if (!await directory.exists()) {
-        await directory.create(recursive: true);
-      }
-
-      await service.setSaveDirectory(selectedDirectory);
-
-      if (!mounted) return;
-
-      setState(() {
-        saveDirectory = selectedDirectory;
-        status = 'Save location updated';
-      });
-
-      showSnackBar('Save folder updated successfully');
-    } catch (error) {
-      if (!mounted) return;
-
-      showSnackBar('Could not select folder: $error');
-    }
-  }
-
-  Future<void> openSaveFolder() async {
-    if (kIsWeb || !Platform.isWindows) return;
-
-    try {
-      final directory = Directory(saveDirectory);
-      if (!await directory.exists()) {
-        throw FileSystemException('Save folder does not exist', saveDirectory);
-      }
-
-      await Process.start('explorer.exe', [directory.path]);
-    } catch (error) {
-      if (!mounted) return;
-
-      showSnackBar('Could not open save folder: $error');
-    }
   }
 
   Future<void> saveReceivedFile(ReceivedFile receivedFile) async {
@@ -131,20 +75,21 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         );
       }
 
+      final activeDir =
+          AppSettingsController.instance.saveDirectory.value.isNotEmpty
+              ? AppSettingsController.instance.saveDirectory.value
+              : saveDirectory;
+
       final destinationPath = await FilePicker.saveFile(
         dialogTitle: 'Save received file',
         fileName: receivedFile.name,
-        initialDirectory: Platform.isWindows ? saveDirectory : null,
+        initialDirectory: Platform.isWindows ? activeDir : null,
         lockParentWindow: Platform.isWindows,
         bytes: Platform.isWindows ? null : await sourceFile.readAsBytes(),
       );
       if (destinationPath == null) return;
 
       if (Platform.isWindows) {
-        // Compare resolved paths to avoid copying a file onto itself.
-        // FileSystemEntity.identical() throws if either path doesn't exist
-        // (the destination is a new path, not yet a file), so we compare
-        // canonicalized path strings instead.
         final sourcePath = sourceFile.resolveSymbolicLinksSync();
         final destResolved = File(destinationPath).absolute.path;
         final sameFile =
@@ -219,225 +164,406 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     super.dispose();
   }
 
+  BoxDecoration _homeStyleCard({
+    required Color baseCard,
+    required Color accent,
+    required bool isDark,
+  }) {
+    return BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Color.alphaBlend(
+            accent.withValues(alpha: isDark ? 0.08 : 0.11),
+            baseCard,
+          ),
+          baseCard,
+        ],
+      ),
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(
+        color: accent.withValues(alpha: 0.26),
+        width: 1,
+      ),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.28),
+          blurRadius: 18,
+          offset: const Offset(0, 8),
+        ),
+        BoxShadow(
+          color: accent.withValues(alpha: 0.06),
+          blurRadius: 20,
+          spreadRadius: -2,
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isWeb = kIsWeb;
-    final isAndroid = !isWeb && Platform.isAndroid;
-    final isWindows = !isWeb && Platform.isWindows;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final bgColor =
+        isDark ? const Color(0xFF060A12) : const Color(0xFF0F172A);
+    final baseCard =
+        isDark ? const Color(0xFF0E1626) : const Color(0xFF172236);
+    final innerFieldColor =
+        isDark ? const Color(0xFF080D18) : const Color(0xFF0F172A);
+    const cyanPrimary = Color(0xFF00D9FF);
+    const mintPrimary = Color(0xFF34D399);
+    const textColor = Color(0xFFF8FAFC);
+    const subTextColor = Color(0xFF94A3B8);
+    final badgeColor = isRunning ? mintPrimary : cyanPrimary;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Receive Files')),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: ListView(
-          children: [
-            const SizedBox(height: 10),
-
-            Container(
-              height: 75,
-              width: 75,
+      backgroundColor: bgColor,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        foregroundColor: textColor,
+        leading: IconButton(
+          icon: Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(
+              color: cyanPrimary.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(11),
+              border: Border.all(
+                color: cyanPrimary.withValues(alpha: 0.18),
+              ),
+            ),
+            child: const Icon(Icons.menu_rounded, size: 18, color: textColor),
+          ),
+          tooltip: 'Menu',
+          onPressed: () {
+            context.findAncestorStateOfType<MainShellState>()?.openDrawer();
+          },
+        ),
+        title: const Text(
+          'Receive Files',
+          style: TextStyle(
+            color: textColor,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Back to Home',
+            onPressed: () {
+              context.findAncestorStateOfType<MainShellState>()?.switchTab(0);
+            },
+            icon: Container(
+              padding: const EdgeInsets.all(7),
               decoration: BoxDecoration(
-                color: Colors.greenAccent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(24),
-              ),
-              child: const Icon(
-                Icons.wifi,
-                size: 40,
-                color: Colors.greenAccent,
-              ),
-            ),
-
-            const SizedBox(height: 12),
-
-            const Text(
-              'Ready to receive?',
-              style: TextStyle(fontSize: 23, fontWeight: FontWeight.bold),
-            ),
-
-            const SizedBox(height: 6),
-
-            Text(
-              status,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white60),
-            ),
-
-            const SizedBox(height: 16),
-
-            // Save location card.
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(15),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.folder, color: Color(0xFF00D9FF)),
-                        SizedBox(width: 10),
-                        Text(
-                          'SAVE LOCATION',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    SelectableText(
-                      saveDirectory,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white70,
-                      ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    SizedBox(
-                      width: double.infinity,
-                      child: isWeb
-                          ? OutlinedButton.icon(
-                              onPressed: null,
-                              icon: const Icon(Icons.info_outline),
-                              label: const Text('Unavailable in a web browser'),
-                            )
-                          : isAndroid
-                          ? OutlinedButton.icon(
-                              onPressed: null, // Disabled on Android
-                              icon: const Icon(Icons.info_outline),
-                              label: const Text('Android uses app storage'),
-                            )
-                          : isWindows
-                          ? Column(
-                              children: [
-                                OutlinedButton.icon(
-                                  onPressed: openSaveFolder,
-                                  icon: const Icon(Icons.folder_open),
-                                  label: const Text('Open Save Folder'),
-                                ),
-                                const SizedBox(height: 8),
-                                OutlinedButton.icon(
-                                  onPressed: chooseSaveFolder,
-                                  icon: const Icon(Icons.folder),
-                                  label: const Text('Choose Save Folder'),
-                                ),
-                              ],
-                            )
-                          : OutlinedButton.icon(
-                              onPressed: chooseSaveFolder,
-                              icon: const Icon(Icons.folder_open),
-                              label: const Text('Choose Save Folder'),
-                            ),
-                    ),
-                  ],
+                color: cyanPrimary.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(
+                  color: cyanPrimary.withValues(alpha: 0.18),
                 ),
               ),
+              child: const Icon(Icons.home_rounded, size: 18, color: textColor),
             ),
-
-            const SizedBox(height: 12),
-
-            if (isRunning)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(15),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'YOUR DEVICE NAME',
-                        style: TextStyle(
-                          color: Colors.white60,
-                          letterSpacing: 1,
+          ),
+          const SizedBox(width: 6),
+        ],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          children: [
+            // ─── Hero Status Card ───
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
+              decoration: _homeStyleCard(
+                baseCard: baseCard,
+                accent: badgeColor,
+                isDark: isDark,
+              ),
+              child: Column(
+                children: [
+                  Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          badgeColor.withValues(alpha: 0.24),
+                          badgeColor.withValues(alpha: 0.10),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: badgeColor.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Icon(
+                      isRunning
+                          ? Icons.wifi_tethering_rounded
+                          : Icons.wifi_rounded,
+                      size: 30,
+                      color: badgeColor,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    'Ready to receive?',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: textColor,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: subTextColor,
+                    ),
+                  ),
+                  if (isRunning && deviceName.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: innerFieldColor,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: cyanPrimary.withValues(alpha: 0.30),
                         ),
                       ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.devices_rounded,
+                            size: 16,
+                            color: cyanPrimary,
+                          ),
+                          const SizedBox(width: 8),
+                          SelectableText(
+                            deviceName,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: cyanPrimary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
 
-                      const SizedBox(height: 8),
+            const SizedBox(height: 14),
 
-                      SelectableText(
-                        deviceName,
-                        style: const TextStyle(
-                          fontSize: 23,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF00D9FF),
+            // ─── Save Location Info Only (Synced with Settings) ───
+            ValueListenableBuilder<String>(
+              valueListenable: AppSettingsController.instance.saveDirectory,
+              builder: (context, currentDir, _) {
+                final displayPath =
+                    currentDir.isNotEmpty ? currentDir : saveDirectory;
+                return Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: _homeStyleCard(
+                    baseCard: baseCard,
+                    accent: cyanPrimary,
+                    isDark: isDark,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.folder_rounded,
+                            size: 16,
+                            color: cyanPrimary,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            'SAVE LOCATION',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.5,
+                              color: cyanPrimary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 11,
+                        ),
+                        decoration: BoxDecoration(
+                          color: innerFieldColor,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: cyanPrimary.withValues(alpha: 0.14),
+                          ),
+                        ),
+                        child: SelectableText(
+                          displayPath,
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            color: textColor,
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
-              ),
+                );
+              },
+            ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
+            // ─── Start / Stop Button ───
             SizedBox(
               width: double.infinity,
-              height: 50,
+              height: 52,
               child: ElevatedButton.icon(
                 onPressed: isWeb
                     ? null
                     : isRunning
-                    ? stopReceiving
-                    : startReceiving,
+                        ? stopReceiving
+                        : startReceiving,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isRunning
+                      ? Colors.redAccent.withValues(alpha: 0.18)
+                      : cyanPrimary,
+                  foregroundColor:
+                      isRunning ? Colors.redAccent : const Color(0xFF060A12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
                 icon: Icon(
                   isWeb
                       ? Icons.info_outline
                       : isRunning
-                      ? Icons.stop
-                      : Icons.wifi,
+                          ? Icons.stop_rounded
+                          : Icons.wifi_rounded,
                 ),
                 label: Text(
                   isWeb
                       ? 'Use Windows or Android app'
                       : isRunning
-                      ? 'Stop Receiving'
-                      : 'Start Receiving',
+                          ? 'Stop Receiving'
+                          : 'Start Receiving',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
                 ),
               ),
             ),
 
-            const SizedBox(height: 16),
+            const SizedBox(height: 18),
 
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Received Files',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-              ),
+            // ─── Received Files Section ───
+            Row(
+              children: [
+                const Text(
+                  'RECEIVED FILES',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5,
+                    color: subTextColor,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (receivedFiles.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: mintPrimary.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${receivedFiles.length}',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: mintPrimary,
+                      ),
+                    ),
+                  ),
+              ],
             ),
 
             const SizedBox(height: 8),
 
-            SizedBox(
-              height: 200,
+            Container(
+              constraints: const BoxConstraints(minHeight: 150, maxHeight: 240),
+              decoration: _homeStyleCard(
+                baseCard: baseCard,
+                accent: mintPrimary,
+                isDark: isDark,
+              ),
               child: receivedFiles.isEmpty
                   ? const Center(
-                      child: Text(
-                        'No files received yet',
-                        style: TextStyle(color: Colors.white54),
+                      child: Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Text(
+                          'No files received yet',
+                          style: TextStyle(color: subTextColor, fontSize: 13),
+                        ),
                       ),
                     )
-                  : ListView.builder(
-                      primary: false,
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(vertical: 6),
                       itemCount: receivedFiles.length,
+                      separatorBuilder: (_, _) => Divider(
+                        height: 1,
+                        color: mintPrimary.withValues(alpha: 0.14),
+                      ),
                       itemBuilder: (context, index) {
                         return ListTile(
+                          dense: true,
                           leading: const Icon(
-                            Icons.check_circle,
-                            color: Colors.greenAccent,
+                            Icons.check_circle_rounded,
+                            color: mintPrimary,
+                            size: 20,
                           ),
                           title: Text(
                             receivedFiles[index].name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: textColor,
+                            ),
                           ),
                           trailing: IconButton(
                             tooltip: 'Save a copy',
                             onPressed: kIsWeb
                                 ? null
                                 : () => saveReceivedFile(receivedFiles[index]),
-                            icon: const Icon(Icons.download_outlined),
+                            icon: const Icon(
+                              Icons.download_outlined,
+                              size: 20,
+                              color: cyanPrimary,
+                            ),
                           ),
                         );
                       },
